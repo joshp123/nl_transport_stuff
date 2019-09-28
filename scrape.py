@@ -157,10 +157,12 @@ class LineWithDirection:
     def summary(self):
         return {
             "name": self.line_name,
-            "destinations": self.destinations,
+            # set is not JSON friendly
+            "destinations": list(self.destinations),
             "next3": list(self.next_three_departure_times),
             "direction": self.direction,
-            "intervals": self.intervals,
+            # TODO serialization better
+            "intervals": str(self.intervals),
         }
 
     @property
