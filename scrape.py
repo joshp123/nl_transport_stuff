@@ -1,36 +1,108 @@
 import datetime
-import json
-from abc import ABCMeta
+from functools import lru_cache
 
 import requests
 
-# from functools import lru_cache
+
+# In-case we accidentally hammer the upstream API.
+GLOBAL_HEADERS = {"User-Agent": "github.com/joshp123/nl_transport_stuff"}
+API_URL = "http://v0.ovapi.nl/"
 
 
-class DataSource(metaclass=ABCMeta):
-    def get(self):
-        raise NotImplementedError
+class OVAPI:
+    def get(self, endpoint):
+        target = "{}{}".format(API_URL, endpoint)
+        resp = requests.get(target, headers=GLOBAL_HEADERS)
+        resp.raise_for_status
+        return resp.json()
 
 
-class RealDataSource(DataSource):
-    endpoint = "http://v0.ovapi.nl/stopareacode/{}/departures"
+global_api_client = OVAPI()
 
-    def __init__(self, stop_name, direction_code):
+
+class Station:
+    endpoint = "stopareacode/{}/departures"
+
+    def __init__(self, stop_name):
         self.stop_name = stop_name
 
-    def get(self):
+    def __repr__(self):
+        # Kinda hacky, what if there are no timing points? w/e
+        return self.directions[0].stop_name
+
+    def _get(self):
         url = self.endpoint.format(self.stop_name)
-        return requests.get(url).json()
+        return global_api_client.get(url)[self.stop_name]
+
+    @property
+    # @lru_cache(maxsize=1)
+    def directions(self):
+        return [
+            DirectionAtStation(self, timing_point)
+            for timing_point in self._get().keys()
+        ]
+
+    @property
+    def departures(self):
+        for direction in self.directions:
+            yield from direction.trains
 
 
-class FileDataSource(DataSource):
-    def __init__(self, location):
-        self.location = location
+class DirectionAtStation:
+    _endpoint = "tpc/{}/departures"
 
-    # @lru_cache
-    def get(self):
-        with open(self.location, "r") as json_file:
-            return json.load(json_file)
+    def __init__(self, station, timing_point_code):
+        self.timing_point_code = timing_point_code
+        self.station = station
+
+    @property
+    def endpoint(self):
+        return self._endpoint.format(self.timing_point_code)
+
+    @property
+    @lru_cache(maxsize=1)
+    def stop_name(self):
+        return self._get()["Stop"]["TimingPointName"]
+
+    def _get(self):
+        return global_api_client.get(self.endpoint)[self.timing_point_code]
+
+    @property
+    @lru_cache(maxsize=1)
+    def lines(self):
+        return set([t.line for t in self.trains])
+
+    @property
+    def trains(self):
+        return sorted(
+            [Train(k, v) for k, v in self._get()["Passes"].items()],
+            key=lambda t: t.arrival_time,
+        )
+
+    @property
+    def next_arrivals(self):
+        return sorted(self.trains, key=lambda t: t.arrival_time)
+
+    @property
+    def intervals(self):
+        intervals_by_line = {}
+        for line in self.lines:
+            intervals = []
+            trains_to_use = sorted(
+                [t for t in self.trains if t.line == line],
+                key=lambda t: t.target_arrial_time,
+            )
+            for idx, train in enumerate(trains_to_use):
+                try:
+                    interval = (
+                        trains_to_use[idx + 1].target_arrival_time
+                        - train.target_arrival_time
+                    )
+                    intervals.append(timedelta_to_integer_minutes(interval))
+                except IndexError:
+                    break
+            intervals_by_line[line]["min"] = min(intervals)
+            intervals_by_line[line]["max"] = min(intervals)
 
 
 class Train:
@@ -39,7 +111,11 @@ class Train:
         self.train_data = train_data
 
     def __repr__(self):
-        pass
+        return (
+            f"{self.line}\t{self.destination}\t"
+            f"{self.minutes_until_departure} min ({self.arrival_time.time()}, "
+            f"{self.delay_mins})"
+        )
 
     @property
     def line(self):
@@ -64,65 +140,32 @@ class Train:
     @property
     def time_until_departure(self):
         now = datetime.datetime.now()
-        return now - self.arrival_time
+        return self.arrival_time - now
 
     @property
     def minutes_until_departure(self):
         return timedelta_to_integer_minutes(self.time_until_departure)
 
+    @property
+    def delay(self):
+        return self.arrival_time - self.target_arrival_time
+
+    @property
+    def delay_mins(self):
+        return self.delay.total_seconds() / 60
+
 
 def timedelta_to_integer_minutes(timedelta):
-    return int(timedelta.total_seeconds() / 60)
+    return int(timedelta.total_seconds() / 60)
 
 
 def main():
-    # noqa: E501 blijdorp = FileDataSource("/Users/Josh/code/watchdepartures/blijdorp.json")
-    blijdorp = RealDataSource("Bdp", "31008704")
-    data = blijdorp.get()
-
-    trains = [
-        Train(k, v) for k, v in data["Bdp"]["31008703"]["Passes"].items()
-    ]
-    # Dict of train key name or some shit and value is JSON about train
-    print(trains)
-    scheduled_trains = sorted(
-        trains.values(), key=lambda t: t["TargetArrivalTime"]
-    )
-    now = datetime.datetime.now()
-    next_trains = [
-        datetime.datetime.fromisoformat(t["ExpectedArrivalTime"])
-        for t in trains.values()
-    ]
-    time_until_trains = [
-        int((t - now).total_seconds() / 60) for t in next_trains
-    ]
-    print(sorted(time_until_trains))
-
-    get_intervals_from_scheduled_trains(scheduled_trains)
-
-
-def get_intervals_from_scheduled_trains(scheduled_trains):
-    scheduled_times = [
-        datetime.datetime.fromisoformat(t["TargetArrivalTime"])
-        for t in scheduled_trains
-    ]
-
-    intervals = []
-    for idx, time in enumerate(scheduled_times):
-        try:
-            interval = scheduled_times[idx + 1] - time
-            interval_minutes = int(interval.total_seconds() / 60)
-            intervals.append(interval_minutes)
-        except IndexError:
-            break
-    min_interval = min(intervals)
-    max_interval = max(intervals)
-    if min_interval != max_interval:
-        text = "{}-{}".format(min_interval, max_interval)
-    else:
-        text = min_interval
-    interval_data = "Every {} minutes".format(text)
-    print(interval_data)
+    station_codes = ("Bdp", "Whp")
+    for station_code in station_codes:
+        station = Station(station_code)
+        print(station)
+        for train in station.departures:
+            print(train)
 
 
 if __name__ == "__main__":
