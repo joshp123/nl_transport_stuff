@@ -10,3 +10,5 @@ Current use cases:
   it displays metros towards work, when at work, it displays metros towards home).
 
 This code is hacky and ugly for now, yolo!
+
+Data source: https://github.com/skywave/KV78Turbo-OVAPI/wiki
